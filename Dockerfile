@@ -1,31 +1,38 @@
 # syntax=docker/dockerfile:1
 
-FROM oven/bun:1.1.13 as build
+FROM node:20-alpine as build
 
 WORKDIR /app
 
-# Copy package and lock files
+# Copy package files
 COPY package.json tsconfig.json ./
-RUN bun install
+
+# Install dependencies
+RUN npm install
 
 # Copy source code
 COPY ./src ./src
 
 # Build TypeScript
-RUN bun run build
+RUN npm run build
 
-FROM oven/bun:1.1.13 as runtime
+# Production stage
+FROM node:20-alpine as runtime
 
 WORKDIR /app
 
+# Copy package.json and install only production dependencies
 COPY package.json ./
+RUN npm install --production
+
+# Copy built files from build stage
 COPY --from=build /app/build ./build
 
-# Railway sets env vars, .env is optional
+# Set environment
 ENV NODE_ENV=production
 
-# Railway expects a PORT, but this server uses stdio, so we just set a dummy port
-ENV PORT=8080
+# Railway will provide PORT automatically
+EXPOSE ${PORT:-3000}
 
-# Railway expects a start command
-CMD ["bun", "run", "build/index.js"]
+# Start the server
+CMD ["node", "build/index.js"]
