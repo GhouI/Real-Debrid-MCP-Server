@@ -8,27 +8,32 @@ import {
 import express from "express";
 import type { Request, Response } from "express";
 
-// Real-Debrid API base URL
+// Real-Debrid API base URLs
 const RD_API_BASE = "https://api.real-debrid.com/rest/1.0";
+const RD_OAUTH_BASE = "https://api.real-debrid.com/oauth/v2";
 
-// API token from environment variable (required)
-const API_TOKEN = process.env.REAL_DEBRID_API_TOKEN;
+// Default open-source client ID (from Real-Debrid docs)
+const DEFAULT_CLIENT_ID = "X245A4XAIBGVM";
 
-if (!API_TOKEN) {
-  console.error("❌ Error: REAL_DEBRID_API_TOKEN environment variable is required");
-  console.error("📝 Get your API token from: https://real-debrid.com/apitoken");
-  process.exit(1);
-}
+// In-memory storage for user tokens (in production, use Redis or database)
+const userTokens = new Map<string, {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  clientId: string;
+  clientSecret: string;
+}>();
 
-// Helper function to make Real-Debrid API requests
+// Helper function to make Real-Debrid API requests with OAuth
 async function rdApiRequest(
   endpoint: string,
+  accessToken: string,
   method: string = "GET",
   body?: Record<string, any>
 ): Promise<any> {
   const url = `${RD_API_BASE}${endpoint}`;
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${API_TOKEN}`,
+    Authorization: `Bearer ${accessToken}`,
   };
 
   const options: RequestInit = {
@@ -58,226 +63,176 @@ async function rdApiRequest(
   return data;
 }
 
-// Define all available MCP tools
+// OAuth Device Code Flow functions
+async function initiateDeviceAuth() {
+  const response = await fetch(
+    `${RD_OAUTH_BASE}/device/code?client_id=${DEFAULT_CLIENT_ID}&new_credentials=yes`
+  );
+  const data = await response.json();
+  
+  return {
+    deviceCode: data.device_code,
+    userCode: data.user_code,
+    verificationUrl: data.verification_url,
+    expiresIn: data.expires_in,
+    interval: data.interval
+  };
+}
+
+async function getDeviceCredentials(deviceCode: string) {
+  const response = await fetch(
+    `${RD_OAUTH_BASE}/device/credentials?client_id=${DEFAULT_CLIENT_ID}&code=${deviceCode}`
+  );
+  
+  if (!response.ok) {
+    return null; // User hasn't authorized yet
+  }
+  
+  const data = await response.json();
+  return {
+    clientId: data.client_id,
+    clientSecret: data.client_secret
+  };
+}
+
+async function getAccessToken(clientId: string, clientSecret: string, deviceCode: string) {
+  const response = await fetch(`${RD_OAUTH_BASE}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      code: deviceCode,
+      grant_type: "http://oauth.net/grant_type/device/1.0"
+    })
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const data = await response.json();
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresIn: data.expires_in
+  };
+}
+
+async function refreshAccessToken(clientId: string, clientSecret: string, refreshToken: string) {
+  const response = await fetch(`${RD_OAUTH_BASE}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      code: refreshToken,
+      grant_type: "http://oauth.net/grant_type/device/1.0"
+    })
+  });
+
+  const data = await response.json();
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresIn: data.expires_in
+  };
+}
+
+// Define available tools (including OAuth tools)
 const TOOLS: Tool[] = [
   {
-    name: "get_user_info",
-    description: "Get current Real-Debrid user information including premium status, expiration, and points",
+    name: "oauth_start",
+    description: "Start OAuth device code flow - returns a code for the user to enter at real-debrid.com/device",
     inputSchema: {
       type: "object",
       properties: {},
+    },
+  },
+  {
+    name: "oauth_check",
+    description: "Check if OAuth authorization is complete and get access token",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device_code: {
+          type: "string",
+          description: "Device code from oauth_start",
+        },
+      },
+      required: ["device_code"],
+    },
+  },
+  {
+    name: "get_user_info",
+    description: "Get current Real-Debrid user information",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "Session ID from oauth_check",
+        },
+      },
+      required: ["session_id"],
     },
   },
   {
     name: "unrestrict_link",
-    description: "Unrestrict a hoster link and get a direct download link",
+    description: "Unrestrict a hoster link",
     inputSchema: {
       type: "object",
       properties: {
+        session_id: {
+          type: "string",
+          description: "Session ID from OAuth",
+        },
         link: {
           type: "string",
-          description: "The original hoster link to unrestrict",
+          description: "The hoster link to unrestrict",
         },
         password: {
           type: "string",
-          description: "Optional password to unlock the file (if required by hoster)",
-        },
-        remote: {
-          type: "number",
-          description: "Optional: 0 or 1, use Remote traffic (default: 0)",
+          description: "Optional password",
         },
       },
-      required: ["link"],
-    },
-  },
-  {
-    name: "check_link",
-    description: "Check if a file is downloadable on the concerned hoster",
-    inputSchema: {
-      type: "object",
-      properties: {
-        link: {
-          type: "string",
-          description: "The original hoster link to check",
-        },
-        password: {
-          type: "string",
-          description: "Optional password to unlock the file access",
-        },
-      },
-      required: ["link"],
+      required: ["session_id", "link"],
     },
   },
   {
     name: "list_torrents",
-    description: "Get user's torrents list with optional filtering",
+    description: "Get user's torrents list",
     inputSchema: {
       type: "object",
       properties: {
-        offset: {
-          type: "number",
-          description: "Starting offset for pagination",
-        },
-        limit: {
-          type: "number",
-          description: "Number of entries to return (max 5000, default 100)",
+        session_id: {
+          type: "string",
+          description: "Session ID from OAuth",
         },
         filter: {
           type: "string",
-          description: "Filter active torrents only (use 'active')",
+          description: "Filter: 'active' for active torrents only",
         },
       },
-    },
-  },
-  {
-    name: "get_torrent_info",
-    description: "Get detailed information about a specific torrent",
-    inputSchema: {
-      type: "object",
-      properties: {
-        torrent_id: {
-          type: "string",
-          description: "The ID of the torrent",
-        },
-      },
-      required: ["torrent_id"],
-    },
-  },
-  {
-    name: "add_torrent",
-    description: "Add a torrent file to Real-Debrid via file upload or HTTP link",
-    inputSchema: {
-      type: "object",
-      properties: {
-        link: {
-          type: "string",
-          description: "HTTP link to the torrent file",
-        },
-        host: {
-          type: "string",
-          description: "Hoster domain (from /torrents/availableHosts)",
-        },
-      },
-      required: ["link"],
+      required: ["session_id"],
     },
   },
   {
     name: "add_magnet",
-    description: "Add a magnet link to Real-Debrid",
+    description: "Add a magnet link",
     inputSchema: {
       type: "object",
       properties: {
+        session_id: {
+          type: "string",
+          description: "Session ID from OAuth",
+        },
         magnet: {
           type: "string",
-          description: "The magnet link to add",
-        },
-        host: {
-          type: "string",
-          description: "Hoster domain (from /torrents/availableHosts)",
+          description: "The magnet link",
         },
       },
-      required: ["magnet"],
-    },
-  },
-  {
-    name: "select_torrent_files",
-    description: "Select files from a torrent for download",
-    inputSchema: {
-      type: "object",
-      properties: {
-        torrent_id: {
-          type: "string",
-          description: "The ID of the torrent",
-        },
-        files: {
-          type: "string",
-          description: "Selected file IDs (comma separated) or 'all' for all files",
-        },
-      },
-      required: ["torrent_id", "files"],
-    },
-  },
-  {
-    name: "delete_torrent",
-    description: "Delete a torrent from the torrents list",
-    inputSchema: {
-      type: "object",
-      properties: {
-        torrent_id: {
-          type: "string",
-          description: "The ID of the torrent to delete",
-        },
-      },
-      required: ["torrent_id"],
-    },
-  },
-  {
-    name: "list_downloads",
-    description: "Get user's downloads list",
-    inputSchema: {
-      type: "object",
-      properties: {
-        offset: {
-          type: "number",
-          description: "Starting offset for pagination",
-        },
-        limit: {
-          type: "number",
-          description: "Number of entries to return (max 5000, default 100)",
-        },
-      },
-    },
-  },
-  {
-    name: "delete_download",
-    description: "Delete a link from downloads list",
-    inputSchema: {
-      type: "object",
-      properties: {
-        download_id: {
-          type: "string",
-          description: "The ID of the download to delete",
-        },
-      },
-      required: ["download_id"],
-    },
-  },
-  {
-    name: "get_traffic_info",
-    description: "Get traffic information for limited hosters",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "get_supported_hosts",
-    description: "Get all supported hoster domains",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "get_available_torrent_hosts",
-    description: "Get available hosts to upload torrents to",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-  },
-  {
-    name: "instant_availability",
-    description: "Check if torrents are instantly available (cached) by their hash",
-    inputSchema: {
-      type: "object",
-      properties: {
-        hash: {
-          type: "string",
-          description: "Comma-separated list of torrent SHA1 hashes (lowercase, up to 100 hashes)",
-        },
-      },
-      required: ["hash"],
+      required: ["session_id", "magnet"],
     },
   },
 ];
@@ -285,8 +240,8 @@ const TOOLS: Tool[] = [
 // Create MCP server instance
 const server = new Server(
   {
-    name: "real-debrid-mcp",
-    version: "1.0.0",
+    name: "real-debrid-mcp-oauth",
+    version: "2.0.0",
   },
   {
     capabilities: {
@@ -295,24 +250,123 @@ const server = new Server(
   }
 );
 
-// List available tools handler
+// List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools: TOOLS };
 });
 
-// Handle tool execution requests
+// Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
-    // Ensure args exists
     if (!args) {
       throw new Error("No arguments provided");
     }
 
     switch (name) {
+      case "oauth_start": {
+        const authData = await initiateDeviceAuth();
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                device_code: authData.deviceCode,
+                user_code: authData.userCode,
+                verification_url: authData.verificationUrl,
+                expires_in: authData.expiresIn,
+                message: `Go to ${authData.verificationUrl} and enter code: ${authData.userCode}`,
+                instructions: "Then use oauth_check with the device_code to complete authentication"
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "oauth_check": {
+        const deviceCode = args.device_code as string;
+        
+        // Get device credentials
+        const credentials = await getDeviceCredentials(deviceCode);
+        if (!credentials) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "pending",
+                  message: "User has not authorized yet. Please complete authorization at real-debrid.com/device"
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        // Get access token
+        const tokens = await getAccessToken(credentials.clientId, credentials.clientSecret, deviceCode);
+        if (!tokens) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "pending",
+                  message: "Authorization in progress. Please try again in a few seconds."
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        // Generate session ID and store tokens
+        const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        userTokens.set(sessionId, {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          expiresAt: Date.now() + (tokens.expiresIn * 1000),
+          clientId: credentials.clientId,
+          clientSecret: credentials.clientSecret
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "authorized",
+                session_id: sessionId,
+                message: "Successfully authorized! Use this session_id for all other tools.",
+                expires_in: tokens.expiresIn
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
       case "get_user_info": {
-        const data = await rdApiRequest("/user");
+        const sessionId = args.session_id as string;
+        const session = userTokens.get(sessionId);
+        
+        if (!session) {
+          throw new Error("Invalid session_id. Please authenticate first using oauth_start and oauth_check.");
+        }
+
+        // Check if token needs refresh
+        if (Date.now() >= session.expiresAt) {
+          const newTokens = await refreshAccessToken(
+            session.clientId,
+            session.clientSecret,
+            session.refreshToken
+          );
+          session.accessToken = newTokens.accessToken;
+          session.refreshToken = newTokens.refreshToken;
+          session.expiresAt = Date.now() + (newTokens.expiresIn * 1000);
+          userTokens.set(sessionId, session);
+        }
+
+        const data = await rdApiRequest("/user", session.accessToken);
         return {
           content: [
             {
@@ -324,26 +378,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "unrestrict_link": {
-        const data = await rdApiRequest("/unrestrict/link", "POST", {
-          link: args.link as string,
-          password: args.password as string | undefined,
-          remote: (args.remote as number) || 0,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
+        const sessionId = args.session_id as string;
+        const session = userTokens.get(sessionId);
+        
+        if (!session) {
+          throw new Error("Invalid session_id. Please authenticate first.");
+        }
 
-      case "check_link": {
-        const data = await rdApiRequest("/unrestrict/check", "POST", {
+        const data = await rdApiRequest("/unrestrict/link", session.accessToken, "POST", {
           link: args.link as string,
           password: args.password as string | undefined,
         });
+        
         return {
           content: [
             {
@@ -355,43 +401,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "list_torrents": {
+        const sessionId = args.session_id as string;
+        const session = userTokens.get(sessionId);
+        
+        if (!session) {
+          throw new Error("Invalid session_id. Please authenticate first.");
+        }
+
         let endpoint = "/torrents";
-        const params = new URLSearchParams();
-        if (args.offset) params.append("offset", String(args.offset));
-        if (args.limit) params.append("limit", String(args.limit));
-        if (args.filter) params.append("filter", String(args.filter));
-        
-        const queryString = params.toString();
-        if (queryString) endpoint += `?${queryString}`;
-        
-        const data = await rdApiRequest(endpoint);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
+        if (args.filter) {
+          endpoint += `?filter=${args.filter}`;
+        }
 
-      case "get_torrent_info": {
-        const data = await rdApiRequest(`/torrents/info/${args.torrent_id as string}`);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "add_torrent": {
-        const data = await rdApiRequest("/torrents/addTorrent", "POST", {
-          link: args.link as string,
-          host: args.host as string | undefined,
-        });
+        const data = await rdApiRequest(endpoint, session.accessToken);
         return {
           content: [
             {
@@ -403,126 +425,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "add_magnet": {
-        const data = await rdApiRequest("/torrents/addMagnet", "POST", {
+        const sessionId = args.session_id as string;
+        const session = userTokens.get(sessionId);
+        
+        if (!session) {
+          throw new Error("Invalid session_id. Please authenticate first.");
+        }
+
+        const data = await rdApiRequest("/torrents/addMagnet", session.accessToken, "POST", {
           magnet: args.magnet as string,
-          host: args.host as string | undefined,
         });
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "select_torrent_files": {
-        const data = await rdApiRequest(
-          `/torrents/selectFiles/${args.torrent_id as string}`,
-          "POST",
-          {
-            files: args.files as string,
-          }
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "delete_torrent": {
-        await rdApiRequest(
-          `/torrents/delete/${args.torrent_id as string}`,
-          "DELETE"
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, message: "Torrent deleted successfully" }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "list_downloads": {
-        let endpoint = "/downloads";
-        const params = new URLSearchParams();
-        if (args.offset) params.append("offset", String(args.offset));
-        if (args.limit) params.append("limit", String(args.limit));
         
-        const queryString = params.toString();
-        if (queryString) endpoint += `?${queryString}`;
-        
-        const data = await rdApiRequest(endpoint);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "delete_download": {
-        await rdApiRequest(
-          `/downloads/delete/${args.download_id as string}`,
-          "DELETE"
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ success: true, message: "Download deleted successfully" }, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_traffic_info": {
-        const data = await rdApiRequest("/traffic");
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_supported_hosts": {
-        const data = await rdApiRequest("/hosts/domains");
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "get_available_torrent_hosts": {
-        const data = await rdApiRequest("/torrents/availableHosts");
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
-      }
-
-      case "instant_availability": {
-        const data = await rdApiRequest(`/torrents/instantAvailability/${args.hash as string}`);
         return {
           content: [
             {
@@ -549,65 +462,62 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Start the HTTP API server with SSE transport
+// Start the HTTP server
 async function main() {
   const app = express();
   const PORT = process.env.PORT || 3000;
 
-  // Enable JSON parsing for POST requests
   app.use(express.json());
 
-  // Root endpoint - server info
+  // Root endpoint
   app.get("/", (req: Request, res: Response) => {
     res.json({
-      name: "Real-Debrid MCP Server",
-      version: "1.0.0",
+      name: "Real-Debrid MCP Server (OAuth)",
+      version: "2.0.0",
       status: "running",
       transport: "HTTP/SSE",
+      authentication: "OAuth Device Code Flow",
       endpoints: {
         root: "/",
         health: "/health",
         sse: "/sse (MCP connection endpoint)",
-        message: "/message (MCP message handler)"
       },
-      documentation: "https://api.real-debrid.com/",
+      usage: "Use oauth_start tool to begin authentication",
       tools: TOOLS.length
     });
   });
 
-  // Health check endpoint for Railway
+  // Health check
   app.get("/health", (req: Request, res: Response) => {
     res.json({ 
       status: "healthy", 
-      service: "real-debrid-mcp",
+      service: "real-debrid-mcp-oauth",
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      environment: process.env.NODE_ENV || "development"
+      activeSessions: userTokens.size
     });
   });
 
-  // SSE endpoint for MCP client connections
+  // SSE endpoint for MCP
   app.get("/sse", async (req: Request, res: Response) => {
     console.log(`[${new Date().toISOString()}] 🔌 New MCP client connecting via SSE`);
     
-    // Set SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+    res.setHeader('X-Accel-Buffering', 'no');
     
     try {
       const transport = new SSEServerTransport("/message", res);
       await server.connect(transport);
       
-      console.log(`[${new Date().toISOString()}] ✅ MCP client connected successfully`);
+      console.log(`[${new Date().toISOString()}]  MCP client connected successfully`);
       
-      // Handle client disconnect
       req.on('close', () => {
-        console.log(`[${new Date().toISOString()}] 👋 MCP client disconnected`);
+        console.log(`[${new Date().toISOString()}]  MCP client disconnected`);
       });
     } catch (error) {
-      console.error(`[${new Date().toISOString()}] ❌ Error establishing SSE connection:`, error);
+      console.error(`[${new Date().toISOString()}]  Error establishing SSE connection:`, error);
       if (!res.headersSent) {
         res.status(500).json({ 
           error: "Failed to establish SSE connection",
@@ -617,55 +527,45 @@ async function main() {
     }
   });
 
-  // Message endpoint for MCP protocol (handled by SSE transport)
+  // Message endpoint
   app.post("/message", express.json(), async (req: Request, res: Response) => {
-    // The SSE transport automatically handles message processing
-    // This endpoint exists for the MCP protocol but doesn't need manual handling
     res.status(200).end();
   });
 
-  // 404 handler for undefined routes
+  // 404 handler
   app.use((req: Request, res: Response) => {
     res.status(404).json({ 
       error: "Not Found",
-      message: `Route ${req.method} ${req.path} not found`,
-      availableEndpoints: {
-        "GET /": "Server information",
-        "GET /health": "Health check",
-        "GET /sse": "MCP SSE connection",
-        "POST /message": "MCP message handler"
-      }
+      message: `Route ${req.method} ${req.path} not found`
     });
   });
 
-  // Global error handler
+  // Error handler
   app.use((err: any, req: Request, res: Response, next: any) => {
-    console.error(`[${new Date().toISOString()}] ❌ Express error:`, err);
+    console.error(`[${new Date().toISOString()}]  Express error:`, err);
     res.status(500).json({ 
       error: "Internal Server Error",
       message: err.message 
     });
   });
 
-  // Start listening
   app.listen(PORT, () => {
     console.log("═".repeat(60));
-    console.log("🚀 REAL-DEBRID MCP SERVER STARTED");
+    console.log(" REAL-DEBRID MCP SERVER (OAuth) STARTED");
     console.log("═".repeat(60));
-    console.log(`📡 Transport:     HTTP/SSE (Railway-compatible)`);
-    console.log(`🌐 Port:          ${PORT}`);
-    console.log(`🏥 Health Check:  http://localhost:${PORT}/health`);
-    console.log(`🔌 SSE Endpoint:  http://localhost:${PORT}/sse`);
-    console.log(`🛠️  Tools:         ${TOOLS.length} Real-Debrid tools available`);
-    console.log(`⏰ Started:       ${new Date().toISOString()}`);
-    console.log(`🔐 Token:         ${API_TOKEN ? '✓ Configured' : '✗ Missing'}`);
+    console.log(` Transport:     HTTP/SSE (Railway-compatible)`);
+    console.log(` Auth Method:   OAuth Device Code Flow`);
+    console.log(` Port:          ${PORT}`);
+    console.log(` Health Check:  http://localhost:${PORT}/health`);
+    console.log(` SSE Endpoint:  http://localhost:${PORT}/sse`);
+    console.log(`  Tools:         ${TOOLS.length} Real-Debrid tools available`);
+    console.log(` Started:       ${new Date().toISOString()}`);
     console.log("═".repeat(60));
-    console.log("💡 Ready to accept MCP connections!");
+    console.log(" Users authenticate via oauth_start tool!");
     console.log("═".repeat(60));
   });
 }
 
-// Start the server
 main().catch((error) => {
   console.error("❌ Fatal error starting server:", error);
   process.exit(1);
