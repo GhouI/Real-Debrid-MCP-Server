@@ -1,0 +1,19 @@
+# Railway configuration for Real-Debrid MCP Server
+[build]
+# Use the Python Dockerfile
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.python"
+
+[deploy]
+# Automatically restart on failure
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# Health check configuration
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+
+# Environment configuration
+[deploy.env]
+# Railway automatically provides PORT
+# No need to set REAL_DEBRID_API_TOKEN here - use OAuth instead
