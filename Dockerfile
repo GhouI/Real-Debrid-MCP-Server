@@ -1,38 +1,41 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-alpine as build
+# Build stage - compile TypeScript
+FROM node:20-alpine as builder
 
 WORKDIR /app
 
 # Copy package files
 COPY package.json tsconfig.json ./
 
-# Install dependencies
+# Install ALL dependencies (including devDependencies for TypeScript)
 RUN npm install
 
 # Copy source code
 COPY ./src ./src
 
-# Build TypeScript
+# Build TypeScript to JavaScript
 RUN npm run build
 
-# Production stage
-FROM node:20-alpine as runtime
+# Production stage - run the app
+FROM node:20-alpine
 
 WORKDIR /app
 
-# Copy package.json and install only production dependencies
+# Copy package.json
 COPY package.json ./
-RUN npm install --production
 
-# Copy built files from build stage
-COPY --from=build /app/build ./build
+# Install ONLY production dependencies (no TypeScript, no @types)
+RUN npm install --omit=dev
 
-# Set environment
+# Copy compiled JavaScript from builder stage
+COPY --from=builder /app/build ./build
+
+# Set production environment
 ENV NODE_ENV=production
 
-# Railway will provide PORT automatically
-EXPOSE ${PORT:-3000}
+# Railway provides PORT - expose it for documentation
+EXPOSE 3000
 
 # Start the server
 CMD ["node", "build/index.js"]
