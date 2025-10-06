@@ -9,7 +9,7 @@ COPY package.json tsconfig.json ./
 RUN bun install
 
 # Copy source code
-COPY src ./src
+COPY ./src ./src
 
 # Build TypeScript
 RUN bun run build
@@ -29,4 +29,3 @@ ENV PORT=8080
 
 # Railway expects a start command
 CMD ["bun", "run", "build/index.js"]
-
