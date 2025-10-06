@@ -1,0 +1,10 @@
+node_modules/
+./node_modules/
+./build/
+./dist/
+./out/
+./coverage/
+./logs/
+./tmp/
+./cache/
+./temp/

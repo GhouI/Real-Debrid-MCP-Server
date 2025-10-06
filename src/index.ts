@@ -17,7 +17,6 @@ const API_TOKEN = process.env.REAL_DEBRID_API_TOKEN;
 if (!API_TOKEN) {
   console.error("❌ Error: REAL_DEBRID_API_TOKEN environment variable is required");
   console.error("📝 Get your API token from: https://real-debrid.com/apitoken");
-  console.error("⚙️  Set it in Railway dashboard under Variables tab");
   process.exit(1);
 }
 
@@ -306,6 +305,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    // Ensure args exists
+    if (!args) {
+      throw new Error("No arguments provided");
+    }
+
     switch (name) {
       case "get_user_info": {
         const data = await rdApiRequest("/user");
@@ -321,9 +325,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "unrestrict_link": {
         const data = await rdApiRequest("/unrestrict/link", "POST", {
-          link: args.link,
-          password: args.password,
-          remote: args.remote || 0,
+          link: args.link as string,
+          password: args.password as string | undefined,
+          remote: (args.remote as number) || 0,
         });
         return {
           content: [
@@ -337,8 +341,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "check_link": {
         const data = await rdApiRequest("/unrestrict/check", "POST", {
-          link: args.link,
-          password: args.password,
+          link: args.link as string,
+          password: args.password as string | undefined,
         });
         return {
           content: [
@@ -353,9 +357,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_torrents": {
         let endpoint = "/torrents";
         const params = new URLSearchParams();
-        if (args.offset) params.append("offset", args.offset.toString());
-        if (args.limit) params.append("limit", args.limit.toString());
-        if (args.filter) params.append("filter", args.filter);
+        if (args.offset) params.append("offset", String(args.offset));
+        if (args.limit) params.append("limit", String(args.limit));
+        if (args.filter) params.append("filter", String(args.filter));
         
         const queryString = params.toString();
         if (queryString) endpoint += `?${queryString}`;
@@ -372,7 +376,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_torrent_info": {
-        const data = await rdApiRequest(`/torrents/info/${args.torrent_id}`);
+        const data = await rdApiRequest(`/torrents/info/${args.torrent_id as string}`);
         return {
           content: [
             {
@@ -385,8 +389,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "add_torrent": {
         const data = await rdApiRequest("/torrents/addTorrent", "POST", {
-          link: args.link,
-          host: args.host,
+          link: args.link as string,
+          host: args.host as string | undefined,
         });
         return {
           content: [
@@ -400,8 +404,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "add_magnet": {
         const data = await rdApiRequest("/torrents/addMagnet", "POST", {
-          magnet: args.magnet,
-          host: args.host,
+          magnet: args.magnet as string,
+          host: args.host as string | undefined,
         });
         return {
           content: [
@@ -415,10 +419,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "select_torrent_files": {
         const data = await rdApiRequest(
-          `/torrents/selectFiles/${args.torrent_id}`,
+          `/torrents/selectFiles/${args.torrent_id as string}`,
           "POST",
           {
-            files: args.files,
+            files: args.files as string,
           }
         );
         return {
@@ -433,7 +437,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "delete_torrent": {
         await rdApiRequest(
-          `/torrents/delete/${args.torrent_id}`,
+          `/torrents/delete/${args.torrent_id as string}`,
           "DELETE"
         );
         return {
@@ -449,8 +453,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_downloads": {
         let endpoint = "/downloads";
         const params = new URLSearchParams();
-        if (args.offset) params.append("offset", args.offset.toString());
-        if (args.limit) params.append("limit", args.limit.toString());
+        if (args.offset) params.append("offset", String(args.offset));
+        if (args.limit) params.append("limit", String(args.limit));
         
         const queryString = params.toString();
         if (queryString) endpoint += `?${queryString}`;
@@ -468,7 +472,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "delete_download": {
         await rdApiRequest(
-          `/downloads/delete/${args.download_id}`,
+          `/downloads/delete/${args.download_id as string}`,
           "DELETE"
         );
         return {
@@ -518,7 +522,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "instant_availability": {
-        const data = await rdApiRequest(`/torrents/instantAvailability/${args.hash}`);
+        const data = await rdApiRequest(`/torrents/instantAvailability/${args.hash as string}`);
         return {
           content: [
             {
