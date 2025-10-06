@@ -1,0 +1,13 @@
+{
+    "mcpServers": {
+      "real-debrid": {
+        "command": "node",
+        "args": [
+          "/absolute/path/to/real-debrid-mcp/build/index.js"
+        ],
+        "env": {
+          "REAL_DEBRID_API_TOKEN": "YOUR_API_TOKEN_HERE"
+        }
+      }
+    }
+  }

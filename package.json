@@ -1,0 +1,30 @@
+{
+    "name": "real-debrid-mcp",
+    "version": "1.0.0",
+    "description": "Real-Debrid MCP Server for Model Context Protocol",
+    "type": "module",
+    "bin": {
+      "real-debrid-mcp": "./build/index.js"
+    },
+    "scripts": {
+      "build": "tsc",
+      "watch": "tsc --watch",
+      "prepare": "npm run build"
+    },
+    "keywords": [
+      "mcp",
+      "real-debrid",
+      "model-context-protocol",
+      "debrid",
+      "torrents"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+      "@modelcontextprotocol/sdk": "^1.0.0"
+    },
+    "devDependencies": {
+      "@types/node": "^22.0.0",
+      "typescript": "^5.0.0"
+    }
+  }
